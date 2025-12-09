@@ -1,3 +1,10 @@
+# First, my disclaimer.
+I found [this emulator](<https://github.com/docmarionum1/py65emu>) simply by googling "6502 emulator in python". However, it didn't fit my requirements as it doesn't let you hook read and write functions, say for example for a custom video chip, or MMIO. 
+
+That's basically what I added, see [mmu.py](./py65emu/mmu.py)'s Block class for more information regarding how to hook it. All credit goes to the original author, and *my* little mods are basically BSD-2, I do not provide warranty on it.
+
+[Original author.](<https://github.com/docmarionum1>) and [original repo](<https://github.com/docmarionum1/py65emu>)
+
 # Python 6502 Emulator
 
 
