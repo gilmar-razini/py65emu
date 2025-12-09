@@ -1,4 +1,6 @@
 import array
+import io
+from collections.abc import Sequence, Callable
 
 
 class MemoryRangeError(ValueError):
@@ -9,8 +11,159 @@ class ReadOnlyError(TypeError):
     pass
 
 
+class Block:
+    def __init__(
+        self,
+        start: int,
+        length: int,
+        readonly: bool,
+        default: int = 0,
+        handlr: Callable = lambda index: None,
+        handlw: Callable = lambda index, value: None
+    ):
+        """
+        :param int start: The starting address for this block
+        :param int length: The length of this block in bytes
+        :param bool readOnly: Whether this block should be read only
+                              (such as ROM) (default False)
+        :param int default: Default value to initialize the block with
+        :param Callable handlr: Handler when reading from this block.
+                                if it does not modify standard execution, return None.
+                                Must accept index parameter.
+        :param Callable handlw: Handler when writing to this block.
+                                if it does not modify standard execution, return None.
+                                Must accept index and value parameters.
+        """
+        self.start = start
+        self.length = length
+        self.readonly = readonly
+        self.default = default
+        self.handlr = handlr
+        self.handlw = handlw
+        self._memory = array.array("B", [default] * length)
+
+    def reset(self) -> None:
+        if not self.readonly:
+            self._memory = array.array("B", [self.default] * self.length)
+
+    @property
+    def end(self) -> int:
+        return self.start + self.length
+
+    def __setitem__(self, index: int, value: int) -> None:
+        """
+        Set value, absolute to the block, by the address in the block.
+
+        :param int index: Address/Position to write to
+        :param int value: Value to write
+        :raises ReadOnlyError: If block is readonly
+        :raises IndexError: If address is out of bounds for block
+        """
+
+        """
+        if self.readonly:
+            raise ReadOnlyError(
+                "Memory section is readonly "
+                "([${start:0>4x}] - [${length:0>4x}])"
+                .format(start=0, length=self.length)
+            )
+        """
+
+        if index < 0 or index >= self.length:
+            raise IndexError(
+                "Index [${index:0>4x}] is outside of memory range "
+                "([${start:0>4x}] - [${length:0>4x}])".format(
+                    index=index,
+                    start=0x0,
+                    length=self.length
+                )
+            )
+
+        if self.handlw(index, value) is None:
+            self._memory[index] = value
+
+    def __getitem__(self, index: int) -> int:
+        """
+        Get value, relative to the block, by the address in the block.
+
+        :param int index: Position to read from
+        :raises IndexError: If address is out of bounds for block
+        :rtype: int
+        :return: Value of address (8 bit)
+        """
+        if index < 0 or index >= self.length:
+            raise IndexError(
+                "Index [${index:0>4x}] is outside of memory range "
+                "([${start:0>4x}] - [${length:0>4x}])".format(
+                    index=index,
+                    start=0x0,
+                    length=self.length
+                )
+            )
+
+        if (result := self.handlr(index)) is None:
+            return self._memory[index]
+        else: 
+            return result
+
+    def __repr__(self) -> str:
+        result = ""
+        for i in self._memory:
+            result += f"{i:0>2x} "
+
+        return result
+
+    def set(self, addr: int, value: int) -> None:
+        """
+        Set value, by the address in the block.
+
+        :param int index: Address/Position to write to
+        :param int value: Value to write
+        :raises ReadOnlyError: If block is readonly
+        :raises IndexError: If address is out of bounds for block
+        """
+        if self.readonly:
+            raise ReadOnlyError(
+                "Memory section is readonly "
+                "(0x{s.start:0>4x} - 0x{s.end:0>4x})".format(s=self)
+                )
+
+        if addr < self.start or addr >= self.start + self.length:
+            raise IndexError(
+                "Address 0x{addr:0>4x} is outside of memory range "
+                "(0x{s.start:0>4x} - 0x{s.end:0>4x})".format(
+                    addr=addr, s=self
+                )
+            )
+        if self.handlw(addr-self.start, value) is None:
+            self._memory[addr-self.start] = value
+
+    def get(self, addr: int) -> int:
+        """
+        Get value, by the address in the block.
+
+        :param int addr: Address to read from
+        :raises ReadOnlyError: If block is readonly
+        :raises IndexError: If address is out of bounds for block
+        :rtype: int
+        :return: Value of address (8 bit)
+        """
+        if addr < self.start or addr >= self.start + self.length:
+            raise IndexError(
+                "Address 0x{addr:0>4x} is outside of memory range "
+                "(0x{s.start:0>4x} - 0x{s.end:0>4x})".format(
+                    addr=addr, s=self
+                )
+            )
+
+        if (result := self.handlr(addr-self.start)) is None:
+            return self._memory[addr-self.start]
+        else: 
+            return result
+
+
 class MMU:
-    def __init__(self, blocks):
+    def __init__(self, blocks: Sequence[tuple] = []):
         """
         Initialize the MMU with the blocks specified in blocks.  blocks
         is a list of 5-tuples, (start, length, readonly, value, valueOffset).
@@ -21,103 +174,138 @@ class MMU:
         # Different blocks of memory stored seperately so that they can
         # have different properties.  Stored as dict of "start", "length",
         # "readonly" and "memory"
-        self.blocks = []
+        self.blocks: list[Block] = []
 
         for b in blocks:
-            self.addBlock(*b)
+            if isinstance(b, tuple):
+                self.addBlock(*b)
 
-    def reset(self):
+    def reset(self) -> None:
         """
         In all writeable blocks reset all values to zero.
         """
         for b in self.blocks:
-            if not b['readonly']:
-                b['memory'] = array.array('B', [0]*b['length'])
+            b.reset()
 
-    def addBlock(self, start, length, readonly=False, value=None, valueOffset=0):
+    def addBlock(
+        self,
+        start: int,
+        length: int,
+        readonly: bool = False,
+        value: list | tuple | io.BufferedIOBase | None = None,
+        valueOffset: int = 0,
+        handlr: Callable = lambda index: None,
+        handlw: Callable = lambda index, value: None
+    ) -> None:
         """
-        Add a block of memory to the list of blocks with the given start address
-        and length; whether it is readonly or not; and the starting value as either
-        a file pointer, binary value or list of unsigned integers.  If the
-        block overlaps with an existing block an exception will be thrown.
+        Add a block of memory to the list of blocks with the given start
+        address and length; whether it is readonly or not; and the starting
+        value as either a file pointer, binary value or list of unsigned
+        integers.  If the block overlaps with an existing block an exception
+        will be thrown.
 
-        Parameters
-        ----------
-        start : int
-            The starting address of the block of memory
-        length : int
-            The length of the block in bytes
-        readOnly: bool
-            Whether the block should be read only (such as ROM) (default False)
-        value : file pointer, binary or lint of unsigned integers
-            The intial value for the block of memory. Used for loading program
-            data. (Default None)
-        valueOffset : integer
-            Used when copying the above `value` into the block to offset the
-            location it is copied into. For example, to copy byte 0 in `value`
-            into location 1000 in the block, set valueOffest=1000. (Default 0)
+        :param int start: The starting address of the block of memory
+        :param int length: The length of the block in bytes
+        :param bool readOnly: Whether the block should be read only
+                              (such as ROM) (default False)
+        :param value: The intial value for the block of memory. Used for
+                      loading program data. (Default None)
+        :param int valueOffset: Used when copying the above `value` into the
+                                block to offset the location it is copied
+                                into. For example, to copy byte 0 in `value`
+                                into location 1000 in the block, set
+                                valueOffest=1000. (Default 0)
+        :param Callable handlr: Handler when reading from this block.
+                                if it does not modify standard execution, return None.
+                                Must accept index parameter.
+        :param Callable handlw: Handler when writing to this block.
+                                if it does not modify standard execution, return None.
+                                Must accept index and value parameters.
+        :type value: TextIO | list[int]
         """
 
-        # check if the block overlaps with another
         for b in self.blocks:
-            if ((start+length > b['start'] and start+length < b['start']+b['length']) or
-                    (b['start']+b['length'] > start and b['start']+b['length'] < start+length)):
+            if (
+                start + length > b.start
+                and start + length < b.start + b.length
+            ) or (
+                b.start + b.length > start
+                and b.start + b.length < start + length
+            ):
                 raise MemoryRangeError()
 
-        newBlock = {
-            'start': start, 'length': length, 'readonly': readonly,
-            'memory': array.array('B', [0]*length)
-        }
+        newBlock = Block(
+            start=start,
+            length=length,
+            readonly=readonly,
+            handlr=handlr,
+            handlw=handlw
+        )
 
-        # TODO: implement initialization value
-        if type(value) == list:
+        # raise TypeError(type(value))
+
+        if (
+            isinstance(value, list) or
+            isinstance(value, tuple) or
+            isinstance(value, str)
+        ):
             for i in range(len(value)):
-                newBlock['memory'][i+valueOffset] = value[i]
-
-        elif value is not None:
-            a = array.array('B')
+                newBlock[i + valueOffset] = value[i]
+                # newBlock.set(i + valueOffset, value[i])
+        elif isinstance(value, io.BufferedIOBase):
+            a = array.array("B")
             a.frombytes(value.read())
             for i in range(len(a)):
-                newBlock['memory'][i+valueOffset] = a[i]
+                newBlock[i + valueOffset] = a[i]
+                # newBlock.set(i + valueOffset, a[i])
 
         self.blocks.append(newBlock)
 
-    def getBlock(self, addr):
+    def getBlock(self, addr: int) -> Block:
         """
         Get the block associated with the given address.
+
+        :param int addr: Memory address to locate
         """
 
         for b in self.blocks:
-            if addr >= b['start'] and addr < b['start']+b['length']:
+            if addr >= b.start and addr < b.start + b.length:
                 return b
 
-        raise IndexError
+        raise IndexError("Unable to locate position %{:0>4x}".format(addr))
 
-    def getIndex(self, block, addr):
-        """
-        Get the index, relative to the block, of the address in the block.
-        """
-        return addr-block['start']
-
-    def write(self, addr, value):
+    def write(self, addr: int, value: int) -> None:
         """
         Write a value to the given address if it is writeable.
+
+        :param int index: Address/Position to write to
+        :param int value: Value to write
+        :raises ReadOnlyError: If block is readonly
+        :raises IndexError: If address is out of bounds for block
         """
         b = self.getBlock(addr)
-        if b['readonly']:
-            raise ReadOnlyError()
+        b.set(addr, value & 0xFF)
 
-        i = self.getIndex(b, addr)
-
-        b['memory'][i] = value & 0xff
-
-    def read(self, addr):
+    def read(self, addr: int) -> int:
         """
         Return the value at the address.
+
+        :param int index: Address to read from
+        :param int value: Value to write
+        :raises IndexError: If address is out of bounds for block
+        :rtype: int
+        :return: Value at address (8 bit)
         """
         b = self.getBlock(addr)
-        i = self.getIndex(b, addr)
-        return b['memory'][i]
+        return b.get(addr)
 
-    def readWord(self, addr):
-        return (self.read(addr+1) << 8) + self.read(addr)
+    def readWord(self, addr: int) -> int:
+        """
+        Return the value at the address.
+
+        :param int index: Address to read from
+        :raises IndexError: If address is out of bounds for block
+        :rtype: int
+        :return: Value at address (16 bit)
+        """
+        return (self.read(addr + 1) << 8) + self.read(addr)
